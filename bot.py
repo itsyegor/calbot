@@ -16,6 +16,14 @@ from googleapiclient.discovery import build
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+
+async def is_owner(update):
+    if update.effective_user.id != OWNER_ID:
+        await update.effective_message.reply_text("⛔ Этот бот личный.")
+        return False
+    return True
+
 # ─── Google Calendar ────────────────────────────────────────────────────────
 
 def get_calendar_service():
@@ -169,6 +177,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_owner(update): return
     await update.message.reply_text("🤔 Анализирую...")
     try:
         event_data, text_reply = await process_with_claude(text=update.message.text)
@@ -186,6 +195,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_owner(update): return
     await update.message.reply_text("🤔 Читаю скриншот...")
     try:
         photo = update.message.photo[-1]
@@ -206,6 +216,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_owner(update): return
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
