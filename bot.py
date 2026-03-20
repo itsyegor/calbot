@@ -193,11 +193,11 @@ def confirmation_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Добавить", callback_data="add_default"),
-            InlineKeyboardButton("🔔 За 2 часа", callback_data="add_remind_120"),
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
         ],
         [
-            InlineKeyboardButton("🔔 За сутки", callback_data="add_remind_1440"),
-            InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
+            InlineKeyboardButton("✅🔔 За 2 ч.", callback_data="add_remind_120"),
+            InlineKeyboardButton("✅🔔 За сутки", callback_data="add_remind_1440"),
         ],
     ])
 
