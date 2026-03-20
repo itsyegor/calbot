@@ -20,7 +20,7 @@ OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
 async def is_owner(update):
     if update.effective_user.id != OWNER_ID:
-        await update.effective_message.reply_text("⛔ Этот бот личный.")
+        await update.effective_message.reply_text("Этот бот личный.")
         return False
     return True
 
@@ -40,29 +40,51 @@ def get_calendar_service():
         creds.refresh(Request())
     return build("calendar", "v3", credentials=creds)
 
-def create_calendar_event(title, date, time_start=None, time_end=None, location=None, description=None):
+def create_calendar_event(title, date_start, date_end=None, time_start=None, time_end=None,
+                          location=None, description=None, reminder_minutes=None):
     service = get_calendar_service()
-    if date and time_start:
-        start = {"dateTime": f"{date}T{time_start}:00", "timeZone": "Europe/Moscow"}
-        if time_end:
-            end = {"dateTime": f"{date}T{time_end}:00", "timeZone": "Europe/Moscow"}
+
+    # Multi-day all-day event
+    if not time_start:
+        start = {"date": date_start}
+        # For all-day multi-day: end date is exclusive in Google Calendar
+        if date_end and date_end != date_start:
+            # add one day to end date
+            from datetime import date, timedelta
+            end_dt = date.fromisoformat(date_end) + timedelta(days=1)
+            end = {"date": end_dt.isoformat()}
         else:
-            h, m = map(int, time_start.split(":"))
-            h = (h + 2) % 24
-            end = {"dateTime": f"{date}T{h:02d}:{m:02d}:00", "timeZone": "Europe/Moscow"}
-    elif date:
-        start = {"date": date}
-        end = {"date": date}
+            end = {"date": date_start}
     else:
-        return None, "Не удалось определить дату"
+        start = {"dateTime": f"{date_start}T{time_start}:00", "timeZone": "Europe/Moscow"}
+        if time_end:
+            end_date = date_end if date_end else date_start
+            end = {"dateTime": f"{end_date}T{time_end}:00", "timeZone": "Europe/Moscow"}
+        else:
+            from datetime import datetime as dt, timedelta
+            start_dt = dt.fromisoformat(f"{date_start}T{time_start}:00")
+            end_dt = start_dt + timedelta(hours=2)
+            end = {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "Europe/Moscow"}
+
     body = {"summary": title, "start": start, "end": end}
-    if location: body["location"] = location
-    if description: body["description"] = description
+    if location:
+        body["location"] = location
+    if description:
+        body["description"] = description
+
+    if reminder_minutes is not None:
+        body["reminders"] = {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": reminder_minutes}]
+        }
+    else:
+        body["reminders"] = {"useDefault": True}
+
     event = service.events().insert(calendarId="primary", body=body).execute()
     return event.get("htmlLink"), None
 
 
-# ─── Claude tools ────────────────────────────────────────────────────────────
+# ─── Claude tool ────────────────────────────────────────────────────────────
 
 CALENDAR_TOOL = {
     "name": "propose_calendar_event",
@@ -70,31 +92,35 @@ CALENDAR_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "title":       {"type": "string", "description": "Чистое название мероприятия"},
-            "date":        {"type": "string", "description": "Дата YYYY-MM-DD"},
-            "date_pretty": {"type": "string", "description": "Дата в читаемом виде, например «25 апреля 2025»"},
-            "time_start":  {"type": "string", "description": "Время начала HH:MM"},
-            "time_end":    {"type": "string", "description": "Время окончания HH:MM"},
-            "location":    {"type": "string", "description": "Место проведения"},
-            "description": {"type": "string", "description": "Краткое описание"},
+            "title":        {"type": "string", "description": "Название с тематическим эмодзи в начале"},
+            "date_start":   {"type": "string", "description": "Дата начала YYYY-MM-DD"},
+            "date_end":     {"type": "string", "description": "Дата окончания YYYY-MM-DD (если отличается от date_start — для многодневных событий)"},
+            "date_pretty":  {"type": "string", "description": "Период в читаемом виде, например '25 апреля' или '25 апреля — 3 мая'"},
+            "time_start":   {"type": "string", "description": "Время начала HH:MM (если известно)"},
+            "time_end":     {"type": "string", "description": "Время окончания HH:MM (если известно)"},
+            "location":     {"type": "string", "description": "Место проведения"},
+            "description":  {"type": "string", "description": "Детали: маршрут перелёта, номера рейсов, аэропорты, терминалы, пересадки, адрес отеля и т.д."},
         },
-        "required": ["title", "date", "date_pretty"],
+        "required": ["title", "date_start", "date_pretty"],
     },
 }
 
 SYSTEM_PROMPT = f"""Ты умный помощник, который добавляет мероприятия в Google Календарь.
 
-Пользователь присылает текст или скриншот. Твоя задача:
-1. Извлеки название, дату, время, место
+Пользователь присылает текст, скриншот или PDF. Твоя задача:
+1. Извлеки название, дату начала, дату окончания (если многодневное), время, место
 2. Если дата относительная ("завтра", "в субботу") — вычисли абсолютную от сегодня
-3. Составь чистое лаконичное название (без номеров мест, скобок и мусора). В начале названия ВСЕГДА ставь тематический эмодзи — например 🎭 для театра, 🎵 для концерта, 🎬 для кино, 🏃 для спорта, 🍽️ для ресторана, ✈️ для поездки, 🎨 для выставки и т.д.
-4. Вызови инструмент propose_calendar_event — пользователь сам подтвердит создание
-5. Если это не мероприятие — просто ответь текстом
+3. В начале названия ВСЕГДА ставь тематический эмодзи (например: театр — 🎭, концерт — 🎵, кино — 🎬, спорт — 🏃, ресторан — 🍽, поездка — ✈️, выставка — 🎨, отель — 🏨, перелёт — ✈️, врач — 🏥 и т.д.)
+4. Для МНОГОДНЕВНЫХ событий (отель, аренда, поездка, конференция): обязательно укажи date_end
+5. Для ПЕРЕЛЁТОВ: в description укажи все детали — рейсы, аэропорты, терминалы, время вылета/прилёта, пересадки
+6. Вызови инструмент propose_calendar_event
+7. Если это не мероприятие — просто ответь текстом
+8. НИКОГДА не используй символы ** для выделения текста
 
 Сегодня: {datetime.now().strftime("%Y-%m-%d, %A")}. Часовой пояс: Europe/Moscow."""
 
 
-# ─── Pending events storage (in-memory) ────────────────────────────────────
+# ─── Pending events ─────────────────────────────────────────────────────────
 
 pending_events = {}  # user_id -> event_data
 
@@ -102,7 +128,6 @@ pending_events = {}  # user_id -> event_data
 # ─── Claude processing ──────────────────────────────────────────────────────
 
 async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
-    """Returns (event_data | None, text_response)"""
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     content = []
@@ -126,7 +151,7 @@ async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
     while True:
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1000,
+            max_tokens=1500,
             system=SYSTEM_PROMPT,
             tools=[CALENDAR_TOOL],
             messages=messages,
@@ -136,7 +161,6 @@ async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
             for block in response.content:
                 if block.type == "tool_use" and block.name == "propose_calendar_event":
                     return block.input, None
-            # shouldn't happen
             messages.append({"role": "assistant", "content": response.content})
         else:
             for block in response.content:
@@ -145,16 +169,16 @@ async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
             return None, "Готово!"
 
 
-# ─── Format confirmation message ────────────────────────────────────────────
+# ─── Format confirmation ────────────────────────────────────────────────────
 
 def format_confirmation(e: dict) -> str:
     lines = ["📋 <b>Проверь детали мероприятия:</b>\n"]
     lines.append(f"📌 <b>{e.get('title')}</b>")
-    date_str = e.get("date_pretty") or e.get("date", "")
+    date_str = e.get("date_pretty") or e.get("date_start", "")
     time_str = e.get("time_start", "")
     if time_str:
-        end = e.get("time_end", "")
-        time_str += f" - {end}" if end else ""
+        end_t = e.get("time_end", "")
+        time_str += f" - {end_t}" if end_t else ""
         lines.append(f"📅 {date_str}, {time_str}")
     else:
         lines.append(f"📅 {date_str}")
@@ -168,17 +192,32 @@ def format_confirmation(e: dict) -> str:
 def confirmation_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Добавить", callback_data="confirm_add"),
-            InlineKeyboardButton("❌ Отмена",   callback_data="confirm_cancel"),
-        ]
+            InlineKeyboardButton("✅ Добавить", callback_data="add_default"),
+            InlineKeyboardButton("🔔 За 2 часа", callback_data="add_remind_120"),
+        ],
+        [
+            InlineKeyboardButton("🔔 За сутки", callback_data="add_remind_1440"),
+            InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
+        ],
     ])
+
+
+# ─── Reply helper ───────────────────────────────────────────────────────────
+
+async def send_confirmation(message, event_data):
+    pending_events[message.chat.id] = event_data
+    await message.reply_text(
+        format_confirmation(event_data),
+        parse_mode="HTML",
+        reply_markup=confirmation_keyboard(),
+    )
 
 
 # ─── Telegram handlers ─────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Присылай мероприятие текстом или скриншотом — "
+        "👋 Привет! Присылай мероприятие текстом, скриншотом или PDF — "
         "я покажу что понял, и ты подтвердишь добавление в Google Календарь."
     )
 
@@ -188,17 +227,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         event_data, text_reply = await process_with_claude(text=update.message.text)
         if event_data:
-            pending_events[update.effective_user.id] = event_data
-            await update.message.reply_text(
-                format_confirmation(event_data),
-                parse_mode="HTML",
-                reply_markup=confirmation_keyboard(),
-            )
+            await send_confirmation(update.message, event_data)
         else:
             await update.message.reply_text(text_reply or "Не понял 🤷")
     except Exception as e:
         logger.exception(e)
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_owner(update): return
@@ -209,23 +243,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_bytes = bytes(await file.download_as_bytearray())
         event_data, text_reply = await process_with_claude(image_bytes=image_bytes)
         if event_data:
-            pending_events[update.effective_user.id] = event_data
-            await update.message.reply_text(
-                format_confirmation(event_data),
-                parse_mode="HTML",
-                reply_markup=confirmation_keyboard(),
-            )
+            await send_confirmation(update.message, event_data)
         else:
-            await update.message.reply_text(text_reply or "Не нашёл мероприятие на скриншоте 🤷")
+            await update.message.reply_text(text_reply or "Не нашёл мероприятие 🤷")
     except Exception as e:
         logger.exception(e)
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_owner(update): return
     doc = update.message.document
-    if not doc.mime_type == "application/pdf":
-        await update.message.reply_text("⚠️ Пока поддерживаю только PDF файлы.")
+    if doc.mime_type != "application/pdf":
+        await update.message.reply_text("Пока поддерживаю только PDF файлы.")
         return
     await update.message.reply_text("🤔 Читаю PDF...")
     try:
@@ -233,17 +262,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_bytes = bytes(await file.download_as_bytearray())
         event_data, text_reply = await process_with_claude(pdf_bytes=pdf_bytes)
         if event_data:
-            pending_events[update.effective_user.id] = event_data
-            await update.message.reply_text(
-                format_confirmation(event_data),
-                parse_mode="HTML",
-                reply_markup=confirmation_keyboard(),
-            )
+            await send_confirmation(update.message, event_data)
         else:
             await update.message.reply_text(text_reply or "Не нашёл мероприятие в PDF 🤷")
     except Exception as e:
         logger.exception(e)
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_owner(update): return
@@ -251,36 +275,51 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = update.effective_user.id
 
-    if query.data == "confirm_add":
+    if query.data == "cancel":
+        pending_events.pop(user_id, None)
+        await query.edit_message_text("Отменено.")
+        return
+
+    if query.data.startswith("add_"):
         event_data = pending_events.pop(user_id, None)
         if not event_data:
-            await query.edit_message_text("⚠️ Мероприятие не найдено, попробуй ещё раз.")
+            await query.edit_message_text("Мероприятие не найдено, попробуй ещё раз.")
             return
+
+        reminder_minutes = None
+        if query.data == "add_remind_120":
+            reminder_minutes = 120
+        elif query.data == "add_remind_1440":
+            reminder_minutes = 1440
+
         try:
             link, error = create_calendar_event(
                 title=event_data.get("title"),
-                date=event_data.get("date"),
+                date_start=event_data.get("date_start"),
+                date_end=event_data.get("date_end"),
                 time_start=event_data.get("time_start"),
                 time_end=event_data.get("time_end"),
                 location=event_data.get("location"),
                 description=event_data.get("description"),
+                reminder_minutes=reminder_minutes,
             )
             if link:
+                reminder_text = ""
+                if reminder_minutes == 120:
+                    reminder_text = " (напомню за 2 часа)"
+                elif reminder_minutes == 1440:
+                    reminder_text = " (напомню за сутки)"
                 await query.edit_message_text(
-                    f"✅ <b>{event_data.get('title')}</b> добавлено в календарь!\n\n"
+                    f"✅ <b>{event_data.get('title')}</b> добавлено{reminder_text}!\n\n"
                     f"<a href='{link}'>Открыть в Google Календаре</a>",
                     parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
             else:
-                await query.edit_message_text(f"❌ Ошибка: {error}")
+                await query.edit_message_text(f"Ошибка: {error}")
         except Exception as e:
             logger.exception(e)
-            await query.edit_message_text(f"❌ Ошибка при создании: {e}")
-
-    elif query.data == "confirm_cancel":
-        pending_events.pop(user_id, None)
-        await query.edit_message_text("🚫 Отменено. Пришли другое мероприятие.")
+            await query.edit_message_text(f"Ошибка при создании: {e}")
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
