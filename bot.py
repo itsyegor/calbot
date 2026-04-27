@@ -24,8 +24,6 @@ async def is_owner(update):
         return False
     return True
 
-# ─── Google Calendar ────────────────────────────────────────────────────────
-
 def get_calendar_service():
     token_data = json.loads(os.environ["GOOGLE_TOKEN_JSON"])
     creds = Credentials(
@@ -43,7 +41,6 @@ def get_calendar_service():
 def create_calendar_event(title, date_start, date_end=None, time_start=None, time_end=None,
                           location=None, description=None, reminder_minutes=None):
     service = get_calendar_service()
-
     if not time_start:
         start = {"date": date_start}
         if date_end and date_end != date_start:
@@ -62,48 +59,38 @@ def create_calendar_event(title, date_start, date_end=None, time_start=None, tim
             start_dt = dt.fromisoformat(f"{date_start}T{time_start}:00")
             end_dt = start_dt + timedelta(hours=2)
             end = {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "Europe/Moscow"}
-
     body = {"summary": title, "start": start, "end": end}
     if location: body["location"] = location
     if description: body["description"] = description
     if reminder_minutes is not None:
-        body["reminders"] = {"useDefault": False,
-                             "overrides": [{"method": "popup", "minutes": reminder_minutes}]}
+        body["reminders"] = {"useDefault": False, "overrides": [{"method": "popup", "minutes": reminder_minutes}]}
     else:
         body["reminders"] = {"useDefault": True}
-
     event = service.events().insert(calendarId="primary", body=body).execute()
     return event.get("htmlLink"), None
-
-
-# ─── Claude tools ────────────────────────────────────────────────────────────
 
 EVENT_SCHEMA = {
     "type": "object",
     "properties": {
-        "title":        {"type": "string", "description": "Название с тематическим эмодзи в начале"},
-        "date_start":   {"type": "string", "description": "Дата начала YYYY-MM-DD"},
-        "date_end":     {"type": "string", "description": "Дата окончания YYYY-MM-DD (если отличается)"},
-        "date_pretty":  {"type": "string", "description": "Период в читаемом виде, например '30 апреля' или '30 апреля - 3 мая'"},
-        "time_start":   {"type": "string", "description": "Время начала HH:MM"},
-        "time_end":     {"type": "string", "description": "Время окончания HH:MM"},
-        "location":     {"type": "string", "description": "Место"},
-        "description":  {"type": "string", "description": "Детали события"},
+        "title":        {"type": "string"},
+        "date_start":   {"type": "string"},
+        "date_end":     {"type": "string"},
+        "date_pretty":  {"type": "string"},
+        "time_start":   {"type": "string"},
+        "time_end":     {"type": "string"},
+        "location":     {"type": "string"},
+        "description":  {"type": "string"},
     },
     "required": ["title", "date_start", "date_pretty"],
 }
 
 CALENDAR_TOOL = {
     "name": "propose_calendar_events",
-    "description": "Предлагает создать одно или несколько событий в Google Календаре. Используй массив из одного элемента для одного события, из двух — для парных (билеты туда-обратно, перелёт с пересадкой).",
+    "description": "Предлагает создать одно или несколько событий в Google Календаре.",
     "input_schema": {
         "type": "object",
         "properties": {
-            "events": {
-                "type": "array",
-                "items": EVENT_SCHEMA,
-                "description": "Список событий для создания",
-            }
+            "events": {"type": "array", "items": EVENT_SCHEMA}
         },
         "required": ["events"],
     },
@@ -115,69 +102,88 @@ SYSTEM_PROMPT = f"""Ты умный помощник, который добав�
 
 1. Извлеки все мероприятия из документа
 2. Если дата относительная ("завтра", "в субботу") — вычисли абсолютную от сегодня
-3. В начале названия ВСЕГДА ставь тематический эмодзи (театр — 🎭, концерт — 🎵, кино — 🎬, спорт — 🏃, ресторан — 🍽️, выставка — 🎨, отель — 🏨, поезд/самолет — 🚂/✈️, врач — 🏥 и т.д.)
+3. Формируй название по этим правилам:
+
+   ДЛЯ ТРАНСПОРТА (поезд, самолёт): эмодзи + маршрут
+   Примеры: "✈️ СПб → Милан", "🚂 СПб → Москва"
+
+   ДЛЯ ВСЕГО ОСТАЛЬНОГО: эмодзи + место · событие
+   Место — это название заведения, площадки, клиники, отеля.
+   Событие — название фильма, спектакля, исполнителя, специалиста и т.д.
+   Если место длинное — сокращай до узнаваемой формы.
+   Если события нет (ресторан, отель) — только эмодзи + название места.
+   Примеры: "🎬 Аврора · Грация", "🎭 БДТ · Гамлет", "🎵 Ледовый · Земфира",
+            "🏥 Скандинавия · Кардиолог", "🍽️ Бюро", "🏨 Усадьба Адмирала Лазарева"
+
+   НЕ включай в название: субтитры, версии, классы, номера мест, технические детали.
 
 ТИПЫ СОБЫТИЙ:
 
 А) ПОЛНОДНЕВНЫЙ БАННЕР (НЕ указывай time_start и time_end):
    — Отель, Airbnb, аренда жилья, проживание
    — Поездка, отпуск, командировка целиком
-   Время заезда/выезда обязательно перенеси в description.
+   Укажи date_start и date_end. Время заезда/выезда перенеси в description.
 
 Б) БЛОК В СЕТКЕ ЧАСОВ (указывай time_start и time_end):
-   — Поезда, перелёты, рейсы (всегда с временем)
+   — Перелёты и рейсы (всегда с временем, даже если через ночь)
+   — Поезда
    — Театр, концерт, кино, ресторан, тренировки
-   Для транспорта в description укажи: номер рейса/поезда, вагон, место, маршрут.
+   — Всё что привязано к конкретному времени
+
+ПРАВИЛА ПОЛЯ DESCRIPTION:
+Пиши только то, чего нет в названии, времени и месте. Только то, что понадобится в нужный момент.
+Смысловые блоки разделяй пустой строкой. Без заголовков если смысл очевиден. Без лишних слов.
+
+Примеры:
+
+Рейс:
+Turkish Airlines · TK402
+Пулково T1 → Стамбул IST
+
+Ручная кладь: 8 кг
+Зарегистрированный: 30 кг
+
+Отель:
+Заезд: 28 марта 14:00
+Выезд: 29 марта 12:00
+
+Номер: двухместный люкс
+Бронирование: 523846996
+
+Театр/концерт:
+Амфитеатр, ряд 1, места 3–4
+
+Заказ: 38031252410
+
+Если дополнительных деталей нет — description не заполняй вовсе.
 
 МНОЖЕСТВЕННЫЕ СОБЫТИЯ:
-   — Билеты туда-обратно: создай два события
-   — Перелёт с пересадкой: создай два события (каждый сегмент отдельно)
-   — Всегда передавай все события ОДНИМ вызовом инструмента в массиве events
+— Билеты туда-обратно: два события
+— Перелёт с пересадкой: два события (каждый сегмент отдельно)
+— Передавай все события ОДНИМ вызовом инструмента
 
-УТОЧНЯЮЩИЕ ВОПРОСЫ: задавай только если информации нет вообще и без неё событие создать невозможно.
+УТОЧНЯЮЩИЕ ВОПРОСЫ: только если информации нет вообще и без неё событие создать невозможно.
 
-ВАЖНО: никогда не используй символы * или ** в тексте ответа или в полях событий.
+НИКОГДА не используй символы * или ** в тексте.
 
 Сегодня: {datetime.now().strftime("%Y-%m-%d, %A")}. Часовой пояс: Europe/Moscow."""
 
-
-# ─── Pending events ─────────────────────────────────────────────────────────
-
-pending_events = {}  # user_id -> list of event dicts
-
-
-# ─── Claude processing ──────────────────────────────────────────────────────
+pending_events = {}
 
 async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
     content = []
     if pdf_bytes:
-        content.append({"type": "document", "source": {
-            "type": "base64", "media_type": "application/pdf",
-            "data": base64.standard_b64encode(pdf_bytes).decode(),
-        }})
+        content.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": base64.standard_b64encode(pdf_bytes).decode()}})
         content.append({"type": "text", "text": "Добавь мероприятия из этого документа в мой календарь."})
     elif image_bytes:
-        content.append({"type": "image", "source": {
-            "type": "base64", "media_type": "image/jpeg",
-            "data": base64.standard_b64encode(image_bytes).decode(),
-        }})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(image_bytes).decode()}})
         content.append({"type": "text", "text": "Добавь это мероприятие в мой календарь."})
     else:
         content.append({"type": "text", "text": f"Добавь в календарь:\n\n{text}"})
-
     messages = [{"role": "user", "content": content}]
-
     while True:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            tools=[CALENDAR_TOOL],
-            messages=messages,
-        )
-
+        response = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1500, system=SYSTEM_PROMPT, tools=[CALENDAR_TOOL], messages=messages)
         if response.stop_reason == "tool_use":
             for block in response.content:
                 if block.type == "tool_use" and block.name == "propose_calendar_events":
@@ -189,10 +195,7 @@ async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
                     return [], block.text
             return [], "Готово!"
 
-
-# ─── Format confirmation ────────────────────────────────────────────────────
-
-def format_event_card(e: dict, index: int = None, total: int = None) -> str:
+def format_event_card(e, index=None, total=None):
     lines = []
     if index is not None and total and total > 1:
         lines.append(f"<b>Событие {index + 1} из {total}:</b>")
@@ -211,55 +214,32 @@ def format_event_card(e: dict, index: int = None, total: int = None) -> str:
         lines.append(f"💬 {e['description']}")
     return "\n".join(lines)
 
-def format_confirmation(events: list) -> str:
+def format_confirmation(events):
     header = "📋 <b>Проверь детали мероприятия:</b>\n" if len(events) == 1 else "📋 <b>Проверь детали мероприятий:</b>\n"
-    cards = []
-    for i, e in enumerate(events):
-        cards.append(format_event_card(e, i, len(events)))
+    cards = [format_event_card(e, i, len(events)) for i, e in enumerate(events)]
     return header + "\n\n".join(cards)
 
-def confirmation_keyboard(multi: bool = False):
+def confirmation_keyboard(multi=False):
     add_label = "✅ Добавить все" if multi else "✅ Добавить"
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(add_label, callback_data="add_default"),
-            InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-        ],
-        [
-            InlineKeyboardButton("✅🔔 За 2 ч.", callback_data="add_remind_120"),
-            InlineKeyboardButton("✅🔔 За сутки", callback_data="add_remind_1440"),
-        ],
+        [InlineKeyboardButton(add_label, callback_data="add_default"), InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("✅🔔 За 2 ч.", callback_data="add_remind_120"), InlineKeyboardButton("✅🔔 За сутки", callback_data="add_remind_1440")],
     ])
 
-
-# ─── Send confirmation ───────────────────────────────────────────────────────
-
-async def send_confirmation(message, events: list):
+async def send_confirmation(message, events):
     pending_events[message.chat.id] = events
-    await message.reply_text(
-        format_confirmation(events),
-        parse_mode="HTML",
-        reply_markup=confirmation_keyboard(multi=len(events) > 1),
-    )
-
-
-# ─── Telegram handlers ─────────────────────────────────────────────────────
+    await message.reply_text(format_confirmation(events), parse_mode="HTML", reply_markup=confirmation_keyboard(multi=len(events) > 1))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Привет! Присылай мероприятие текстом, скриншотом или PDF — "
-        "я покажу что понял, и ты подтвердишь добавление в Google Календарь."
-    )
+    await update.message.reply_text("👋 Привет! Присылай мероприятие текстом, скриншотом или PDF — я покажу что понял, и ты подтвердишь добавление в Google Календарь.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_owner(update): return
     await update.message.reply_text("🤔 Анализирую...")
     try:
         events, text_reply = await process_with_claude(text=update.message.text)
-        if events:
-            await send_confirmation(update.message, events)
-        else:
-            await update.message.reply_text(text_reply or "Не понял 🤷")
+        if events: await send_confirmation(update.message, events)
+        else: await update.message.reply_text(text_reply or "Не понял 🤷")
     except Exception as e:
         logger.exception(e)
         await update.message.reply_text(f"Ошибка: {e}")
@@ -272,10 +252,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await file.download_as_bytearray())
         events, text_reply = await process_with_claude(image_bytes=image_bytes)
-        if events:
-            await send_confirmation(update.message, events)
-        else:
-            await update.message.reply_text(text_reply or "Не нашёл мероприятие 🤷")
+        if events: await send_confirmation(update.message, events)
+        else: await update.message.reply_text(text_reply or "Не нашёл мероприятие 🤷")
     except Exception as e:
         logger.exception(e)
         await update.message.reply_text(f"Ошибка: {e}")
@@ -291,10 +269,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(doc.file_id)
         pdf_bytes = bytes(await file.download_as_bytearray())
         events, text_reply = await process_with_claude(pdf_bytes=pdf_bytes)
-        if events:
-            await send_confirmation(update.message, events)
-        else:
-            await update.message.reply_text(text_reply or "Не нашёл мероприятия в PDF 🤷")
+        if events: await send_confirmation(update.message, events)
+        else: await update.message.reply_text(text_reply or "Не нашёл мероприятия в PDF 🤷")
     except Exception as e:
         logger.exception(e)
         await update.message.reply_text(f"Ошибка: {e}")
@@ -304,64 +280,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-
     if query.data == "cancel":
         pending_events.pop(user_id, None)
         await query.edit_message_text("Отменено.")
         return
-
     if query.data.startswith("add_"):
         events = pending_events.pop(user_id, None)
         if not events:
             await query.edit_message_text("Мероприятие не найдено, попробуй ещё раз.")
             return
-
         reminder_minutes = None
-        if query.data == "add_remind_120":
-            reminder_minutes = 120
-        elif query.data == "add_remind_1440":
-            reminder_minutes = 1440
-
+        if query.data == "add_remind_120": reminder_minutes = 120
+        elif query.data == "add_remind_1440": reminder_minutes = 1440
         try:
             links = []
             for e in events:
-                link, error = create_calendar_event(
-                    title=e.get("title"),
-                    date_start=e.get("date_start"),
-                    date_end=e.get("date_end"),
-                    time_start=e.get("time_start"),
-                    time_end=e.get("time_end"),
-                    location=e.get("location"),
-                    description=e.get("description"),
-                    reminder_minutes=reminder_minutes,
-                )
-                if link:
-                    links.append((e.get("title"), link))
-
+                link, error = create_calendar_event(title=e.get("title"), date_start=e.get("date_start"), date_end=e.get("date_end"), time_start=e.get("time_start"), time_end=e.get("time_end"), location=e.get("location"), description=e.get("description"), reminder_minutes=reminder_minutes)
+                if link: links.append((e.get("title"), link))
             reminder_text = ""
-            if reminder_minutes == 120:
-                reminder_text = " (напомню за 2 часа)"
-            elif reminder_minutes == 1440:
-                reminder_text = " (напомню за сутки)"
-
+            if reminder_minutes == 120: reminder_text = " (напомню за 2 часа)"
+            elif reminder_minutes == 1440: reminder_text = " (напомню за сутки)"
             if len(links) == 1:
                 title, link = links[0]
-                text = (f"✅ <b>{title}</b> добавлено{reminder_text}!\n\n"
-                        f"<a href='{link}'>Открыть в Google Календаре</a>")
+                text = f"✅ <b>{title}</b> добавлено{reminder_text}!\n\n<a href='{link}'>Открыть в Google Календаре</a>"
             else:
                 lines = [f"✅ Добавлено {len(links)} события{reminder_text}!\n"]
                 for title, link in links:
                     lines.append(f"<a href='{link}'>{title}</a>")
                 text = "\n".join(lines)
-
             await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True)
-
         except Exception as e:
             logger.exception(e)
             await query.edit_message_text(f"Ошибка при создании: {e}")
-
-
-# ─── Main ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.environ["TELEGRAM_TOKEN"]).build()
