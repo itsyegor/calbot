@@ -178,7 +178,7 @@ Turkish Airlines · TK402
 
 НИКОГДА не используй символы * или ** в тексте.
 
-Сегодня: {datetime.now().strftime("%Y-%m-%d, %A")}. Часовой пояс: Europe/Moscow."""
+Сегодня: {__import__("datetime").datetime.now(__import__("zoneinfo").ZoneInfo("Europe/Moscow")).strftime("%Y-%m-%d, %A (день недели по московскому времени)")}. Часовой пояс: Europe/Moscow. При вычислении дня недели ВСЕГДА используй московское время."""
 
 pending_events = {}
 
@@ -211,19 +211,36 @@ def format_event_card(e, index=None, total=None):
     lines = []
     if index is not None and total and total > 1:
         lines.append(f"<b>Событие {index + 1} из {total}:</b>")
-    lines.append(f"📌 <b>{e.get('title')}</b>")
+    lines.append(f"<b>{e.get('title')}</b>")
     date_str = e.get("date_pretty") or e.get("date_start", "")
     time_str = e.get("time_start", "")
     if time_str:
         end_t = e.get("time_end", "")
         time_str += f" - {end_t}" if end_t else ""
-        lines.append(f"📅 {date_str}, {time_str}")
+        lines.append(f"{date_str}, {time_str}")
     else:
-        lines.append(f"📅 {date_str}")
+        lines.append(f"{date_str}")
     if e.get("location"):
-        lines.append(f"📍 {e['location']}")
+        lines.append(e["location"])
     if e.get("description"):
-        lines.append(f"💬 {e['description']}")
+        lines.append(e["description"])
+    return "\n".join(lines)
+
+def format_event_added(e):
+    lines = []
+    lines.append(f"<b>{e.get('title')}</b>")
+    date_str = e.get("date_pretty") or e.get("date_start", "")
+    time_str = e.get("time_start", "")
+    if time_str:
+        end_t = e.get("time_end", "")
+        time_str += f" - {end_t}" if end_t else ""
+        lines.append(f"{date_str}, {time_str}")
+    else:
+        lines.append(f"{date_str}")
+    if e.get("location"):
+        lines.append(e["location"])
+    if e.get("description"):
+        lines.append(e["description"])
     return "\n".join(lines)
 
 def format_confirmation(events):
@@ -314,12 +331,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif reminder_minutes == 1440: reminder_text = " (напомню за сутки)"
             if len(links) == 1:
                 title, link = links[0]
-                text = f"✅ <b>{title}</b> добавлено{reminder_text}!\n\n<a href='{link}'>Открыть в Google Календаре</a>"
+                e = events[0]
+                card = format_event_added(e)
+                text = f"✅ Добавлено{reminder_text}!\n\n<blockquote>{card}</blockquote>\n<a href='{link}'>Открыть в Google Календаре</a>"
             else:
-                lines = [f"✅ Добавлено {len(links)} события{reminder_text}!\n"]
-                for title, link in links:
-                    lines.append(f"<a href='{link}'>{title}</a>")
-                text = "\n".join(lines)
+                parts = [f"✅ Добавлено {len(links)} события{reminder_text}!\n"]
+                for i, (title, link) in enumerate(links):
+                    e = events[i]
+                    card = format_event_added(e)
+                    parts.append(f"<blockquote>{card}</blockquote>\n<a href='{link}'>Открыть в Google Календаре</a>")
+                text = "\n".join(parts)
             await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as e:
             logger.exception(e)
