@@ -196,8 +196,11 @@ Turkish Airlines · TK402
 Если дополнительных деталей нет — description не заполняй вовсе.
 
 КАЛЕНДАРИ:
-По умолчанию событие идёт в основной календарь пользователя — НЕ указывай calendar_name.
-Только если пользователь ЯВНО называет другой календарь или проект (например "закинь в БЦП", "это по проекту Х") — укажи calendar_name с этим названием.
+У пользователя несколько календарей, например: Основной, БСМЗ, БЦП.
+По умолчанию событие идёт в Основной — НЕ указывай calendar_name.
+Если рядом с сообщением, скриншотом, пересланным письмом или документом пользователь оставил короткую подпись/пометку с названием календаря или проекта (даже одно слово, например "БЦП" или "БСМЗ") — это указание на календарь, используй его как calendar_name.
+Такая пометка не обязательно оформлена как полноценная инструкция — это может быть просто слово или аббревиатура, отдельно от основного текста/документа.
+Если названного календаря не существует — всё равно укажи calendar_name как есть, бот сам обработает это и создаст событие в Основном, а пользователь увидит и сможет поправить.
 
 МНОЖЕСТВЕННЫЕ СОБЫТИЯ:
 — Билеты туда-обратно: два события
@@ -305,8 +308,7 @@ def format_event_card(e, index=None, total=None):
         lines.append(f"{date_str}")
     if e.get("location"):
         lines.append(e["location"])
-    if e.get("calendar_name"):
-        lines.append(f"Календарь: {e['calendar_name']}")
+    lines.append(f"Календарь: {e.get('calendar_name') or 'Основной'}")
     if e.get("description"):
         lines.append(e["description"])
     return "\n".join(lines)
@@ -316,7 +318,7 @@ def format_confirmation(events):
     cards = [format_event_card(e, i, len(events)) for i, e in enumerate(events)]
     return header + "\n\n".join(cards)
 
-def format_event_added(e):
+def format_event_added(e, matched_calendar_name=None):
     lines = []
     lines.append(f"<b>{e.get('title')}</b>")
     date_str = e.get("date_pretty") or e.get("date_start", "")
@@ -329,6 +331,7 @@ def format_event_added(e):
         lines.append(f"{date_str}")
     if e.get("location"):
         lines.append(e["location"])
+    lines.append(f"Календарь: {matched_calendar_name or 'Основной'}")
     if e.get("description"):
         lines.append(e["description"])
     return "\n".join(lines)
@@ -458,20 +461,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     location=e.get("location"), description=e.get("description"),
                     reminder_minutes=reminder_minutes, calendar_name=e.get("calendar_name"),
                 )
-                if link: links.append((e, link))
+                if link: links.append((e, link, matched_cal))
 
             reminder_text = ""
             if reminder_minutes == 120: reminder_text = " (напомню за 2 часа)"
             elif reminder_minutes == 1440: reminder_text = " (напомню за сутки)"
 
             if len(links) == 1:
-                e, link = links[0]
-                card = format_event_added(e)
+                e, link, matched_cal = links[0]
+                card = format_event_added(e, matched_cal)
                 text = f"✅ Добавлено{reminder_text}!\n\n<blockquote>{card}</blockquote>\n<a href='{link}'>Открыть в Google Календаре</a>"
             else:
                 parts = [f"✅ Добавлено {len(links)} события{reminder_text}!\n"]
-                for e, link in links:
-                    card = format_event_added(e)
+                for e, link, matched_cal in links:
+                    card = format_event_added(e, matched_cal)
                     parts.append(f"<blockquote>{card}</blockquote>\n<a href='{link}'>Открыть в Google Календаре</a>")
                 text = "\n".join(parts)
 
