@@ -227,7 +227,7 @@ pending_events = {}  # chat_id -> {"events": [...], "timestamp": datetime, "mess
 
 # ─── Claude processing ──────────────────────────────────────────────────────
 
-async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
+async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None, caption=None):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     content = []
@@ -239,6 +239,9 @@ async def process_with_claude(text=None, image_bytes=None, pdf_bytes=None):
         content.append({"type": "text", "text": "Добавь это мероприятие в мой календарь."})
     else:
         content.append({"type": "text", "text": f"Добавь в календарь:\n\n{text}"})
+
+    if caption:
+        content.append({"type": "text", "text": f"Подпись пользователя к файлу: {caption}"})
 
     messages = [{"role": "user", "content": content}]
 
@@ -339,7 +342,7 @@ def format_event_added(e, matched_calendar_name=None):
 def confirmation_keyboard(multi=False):
     add_label = "✅ Добавить все" if multi else "✅ Добавить"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(add_label, callback_data="add_default"), InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+        [InlineKeyboardButton(add_label, callback_data="add_default", style="success"), InlineKeyboardButton("❌ Отмена", callback_data="cancel", style="danger")],
         [InlineKeyboardButton("✅🔔 За 2 ч.", callback_data="add_remind_120"), InlineKeyboardButton("✅🔔 За сутки", callback_data="add_remind_1440")],
     ])
 
@@ -406,7 +409,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = bytes(await file.download_as_bytearray())
-        events, text_reply = await process_with_claude(image_bytes=image_bytes)
+        events, text_reply = await process_with_claude(image_bytes=image_bytes, caption=update.message.caption)
         if events: await send_confirmation(update.message, events)
         else: await update.message.reply_text(text_reply or "Не нашёл мероприятие 🤷")
     except Exception as e:
@@ -423,7 +426,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(doc.file_id)
         pdf_bytes = bytes(await file.download_as_bytearray())
-        events, text_reply = await process_with_claude(pdf_bytes=pdf_bytes)
+        events, text_reply = await process_with_claude(pdf_bytes=pdf_bytes, caption=update.message.caption)
         if events: await send_confirmation(update.message, events)
         else: await update.message.reply_text(text_reply or "Не нашёл мероприятия в PDF 🤷")
     except Exception as e:
